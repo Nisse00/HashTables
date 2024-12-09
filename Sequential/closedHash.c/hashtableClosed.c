@@ -1,21 +1,22 @@
-//This is a implementation of a closed hash table with chaining.
-
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
 
 struct Node {
-    char *key;             
-    int value;              
-    struct Node *next;      
+    char *key;
+    int value;
+    struct Node *next;
 };
 
 struct HashTable {
-    int size;              
-    struct Node **table;   
+    int size;
+    struct Node **table;
 };
 
+pthread_mutex_t lock;
+
+struct Node *search(struct HashTable *hashTable, const char *key);
 
 void createHashTable(struct HashTable *hashTable, int size) {
     hashTable->size = size;
@@ -26,43 +27,58 @@ void createHashTable(struct HashTable *hashTable, int size) {
 }
 
 int hashFunction(const char *key, int size) {
-    unsigned long hash = 5381; // A common hash seed
+    unsigned long hash = 5381; 
     int c;
 
     while ((c = *key++)) {
-        hash = ((hash << 5) + hash) + c; // hash * 33 + c
+        hash = ((hash << 5) + hash) + c; 
     }
-    printf("Index: %lu\n", hash % size);
     return hash % size;
 }
 
 void insert(struct HashTable *hashTable, const char *key, int value) {
+    pthread_mutex_lock(&lock);
+    if (search(hashTable, key) != NULL) {
+        printf("Key already exists: %s\n", key);
+        pthread_mutex_unlock(&lock);
+        return;
+    }
+
     int index = hashFunction(key, hashTable->size);
-
-    struct Node *newNode = (struct Node *) malloc(sizeof(struct Node));
-    newNode->key = strdup(key); // Allocate memory and copy the key
+    struct Node *newNode = (struct Node *)malloc(sizeof(struct Node));
+    newNode->key = strdup(key); 
     newNode->value = value;
-    newNode->next = hashTable->table[index]; // We make sure that the new node points to the current head of the list
+    newNode->next = hashTable->table[index]; 
+    hashTable->table[index] = newNode; 
 
-    hashTable->table[index] = newNode; // The new node is now the head of the list
+    printf("Inserted %s -> %d at index %d\n", key, value, index);
+
+    pthread_mutex_unlock(&lock);
 }
 
 struct Node *search(struct HashTable *hashTable, const char *key) {
+    pthread_mutex_lock(&lock);
+
     int index = hashFunction(key, hashTable->size);
     struct Node *current = hashTable->table[index];
 
     while (current != NULL) {
-        if (strcmp(current->key, key) == 0) { // Check if the key matches
+        if (strcmp(current->key, key) == 0) {
             printf("Found: %s -> %d\n", current->key, current->value);
-            return current; 
+            pthread_mutex_unlock(&lock);
+            return current;
         }
         current = current->next;
     }
-    printf("Key not found.\n");
-    return NULL; 
+
+    printf("Key not found: %s\n", key);
+    pthread_mutex_unlock(&lock);
+    return NULL;
 }
 
 int delete(struct HashTable *hashTable, const char *key) {
+    pthread_mutex_lock(&lock);
+
     int index = hashFunction(key, hashTable->size);
     struct Node *current = hashTable->table[index];
     struct Node *prev = NULL;
@@ -78,42 +94,80 @@ int delete(struct HashTable *hashTable, const char *key) {
             free(current->key);
             free(current);
 
-            return 1; 
+            printf("Key deleted: %s\n", key);
+            pthread_mutex_unlock(&lock);
+            return 1;
         }
         prev = current;
         current = current->next;
     }
 
+    printf("Key not found: %s\n", key);
+    pthread_mutex_unlock(&lock);
     return 0;
 }
 
-
-
 void destroyHashTable(struct HashTable *hashTable) {
+    pthread_mutex_lock(&lock);
+
     for (int i = 0; i < hashTable->size; i++) {
         struct Node *current = hashTable->table[i];
         while (current != NULL) {
             struct Node *temp = current;
             current = current->next;
-            free(temp->key); 
-            free(temp);  
+            free(temp->key);
+            free(temp);
         }
     }
     free(hashTable->table);
+
+    pthread_mutex_unlock(&lock);
+}
+
+void *work(void *arg) {
+    struct HashTable *hashTable = (struct HashTable *)arg;
+    char names[10][10] = {"Alice", "Bob", "Charlie", "David", "Eve",
+                          "Frank", "Grace", "Heidi", "Ivan", "Judy"};
+    for (int i = 0; i < 10; i++) {
+        insert(hashTable, names[i], i + 1);
+    }
+    return NULL;
 }
 
 int main() {
+    pthread_mutexattr_t attr;
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&lock, &attr);
+    pthread_mutexattr_destroy(&attr);
+
     struct HashTable hashTable;
-    createHashTable(&hashTable, 5);
+    createHashTable(&hashTable, 100);
 
-    insert(&hashTable, "Alice", 25);
-    insert(&hashTable, "Bob", 30);
-    //insert(&hashTable, "Charlie", 35);
+    int nbrThreads = 100; 
+    pthread_t threads[nbrThreads];
 
-    struct Node *node = search(&hashTable, "Alice");
-    struct Node *node2 = search(&hashTable, "Bob");
+    for (int i = 0; i < nbrThreads; i++) {
+        pthread_create(&threads[i], NULL, work, &hashTable);
+    }
 
-    printf("Bob next: %d\n" , node2->next->value); //This should print Alice's value since Bob and alice have the same index
+    for (int i = 0; i < nbrThreads; i++) {
+        pthread_join(threads[i], NULL);
+    }
+
+    char *searchKeys[5] = {"Alice", "Eve", "Ivan", "Charlie", "Grace"};
+    for (int i = 0; i < 5; i++) {
+        search(&hashTable, searchKeys[i]);
+    }
+
+    char *deleteKeys[10] = {"Alice", "Bob", "Charlie", "David", "Eve",
+                            "Frank", "Grace", "Heidi", "Ivan", "Judy"};
+    for (int i = 0; i < 10; i++) {
+        delete(&hashTable, deleteKeys[i]);
+    }
+
     destroyHashTable(&hashTable);
+
+    pthread_mutex_destroy(&lock);
     return 0;
 }
