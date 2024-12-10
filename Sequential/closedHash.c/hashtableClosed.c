@@ -135,6 +135,7 @@ void *work(void *arg) {
 }
 
 int main() {
+    //Have to use a recursive mutex because of needing to call serach() inside insert()
     pthread_mutexattr_t attr;
     pthread_mutexattr_init(&attr);
     pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
