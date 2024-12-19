@@ -5,7 +5,7 @@
 #include <time.h>
 
 #define HASH_TABLE_SIZE 10000  // Increased table size
-#define NUM_PES 15        // Number of Processing Elements
+#define NUM_PES 20       // Number of Processing Elements
 #define MAX_STRING_LENGTH 100  // Maximum string length
 #define MAX_STRINGS_PER_PE 1000000 // Max strings a PE can handle
 
@@ -126,6 +126,23 @@ void* processList(void* arg) {
     return NULL;
 }
 
+int findKey(const char* key) {
+    int idx = hash(key) % HASH_TABLE_SIZE;
+    int targetPE = responsiblePE(idx);
+
+    pthread_mutex_lock(&hashTables[targetPE].lock);
+    int result = 0;
+    for (int i = 0; i < HASH_TABLE_SIZE; i++) {
+        int probeIdx = (idx + i) % HASH_TABLE_SIZE;
+        if (strcmp(hashTables[targetPE].table[probeIdx].key, key) == 0) {
+            result = hashTables[targetPE].table[probeIdx].value;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&hashTables[targetPE].lock);
+    return result;
+}
+
 
 int main() {
     pthread_t threads[NUM_PES];
@@ -169,6 +186,8 @@ int main() {
         fclose(file);
     }
 
+    printf("Total words: %d\n", totalWords);
+
     // Create threads to process lists
     for (int i = 0; i < NUM_PES; i++) {
         peIds[i] = i;
@@ -186,11 +205,26 @@ int main() {
         pthread_mutex_destroy(&bucketLocks[i]);
     }
 
+    // Query specific keys
+    const char* queryKeys[] = {
+        "Lorem", "ipsum", "dolor", "sit", "amet",
+        "consectetuer", "adipiscing", "elit", "Aenean",
+        "commodo", "ligula", "eget", "massa"
+    };
+    int numQueries = sizeof(queryKeys) / sizeof(queryKeys[0]);
+
+    printf("\nKey Frequencies:\n");
+    for (int i = 0; i < numQueries; i++) {
+        int count = findKey(queryKeys[i]);
+        printf("Key \"%s\" found %d times.\n", queryKeys[i], count);
+    }
+
     // Measure execution time
     clock_gettime(CLOCK_MONOTONIC, &end);
     double elapsed = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
-    printf("Program execution time: %.6f seconds\n", elapsed);
+    printf("\nProgram execution time: %.6f seconds\n", elapsed);
 
     return 0;
 }
+
 
