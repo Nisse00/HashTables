@@ -2,15 +2,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
-#include <ctype.h>
+#include <time.h> 
 
-#define HASH_TABLE_SIZE 8
-#define NUM_PES 3
-#define MAX_WORD_LENGTH 100
-#define MAX_WORDS_PER_PE 10
+#define HASH_TABLE_SIZE 10000  // Increased table size
+#define NUM_PES 20                // Number of Processing Elements
+#define MAX_STRING_LENGTH 100      // Maximum string length
+#define MAX_STRINGS_PER_PE 1000000 // Max strings a PE can handle
 
 typedef struct {
-    char key;
+    char key[MAX_STRING_LENGTH];
     int value;
 } HashEntry;
 
@@ -20,133 +20,161 @@ typedef struct {
 } HashTable;
 
 HashTable hashTables[NUM_PES];
-char operations[NUM_PES][MAX_WORDS_PER_PE][MAX_WORD_LENGTH];
-int opCounts[NUM_PES] = {0};
+char stringLists[NUM_PES][MAX_STRINGS_PER_PE][MAX_STRING_LENGTH];
+int stringCounts[NUM_PES] = {0};
 
-// Simple hash function to map keys to indices
-int hash(char key) {
-    return tolower(key) - 'a';
+// Hash function to map a string to a hash table index
+int hash(const char* str) {
+    unsigned long hash = 5381;
+    for (int i = 0; str[i] != '\0'; i++) {
+        hash = ((hash << 5) + hash) + str[i]; // hash * 33 + str[i]
+    }
+    return hash % HASH_TABLE_SIZE;
 }
 
-// Determine which PE is responsible for a given key
-int responsiblePE(char key) {
-    int range = 26 / NUM_PES;
-    return hash(key) / range;
+// Determine which PE is responsible for a given index
+int responsiblePE(int index) {
+    int rangeSize = HASH_TABLE_SIZE / NUM_PES;
+    return index / rangeSize;
 }
 
-// Insert or update a key in the hash table
-void update(HashTable* ht, char key, int value) {
-    int idx = hash(key) % HASH_TABLE_SIZE;
+// Insert or update a string in the hash table
+void update(HashTable* ht, const char* key, int idx) {
 
     for (int i = 0; i < HASH_TABLE_SIZE; i++) {
         int probeIdx = (idx + i) % HASH_TABLE_SIZE;
-        if (ht->table[probeIdx].key == 0 || ht->table[probeIdx].key == key) {
-            ht->table[probeIdx].key = key;
-            ht->table[probeIdx].value += value;
+
+        // If the slot is empty, insert the new string
+        if (ht->table[probeIdx].key[0] == '\0') {
+            strcpy(ht->table[probeIdx].key, key);
+            ht->table[probeIdx].value = 1;
+            return;
+        }
+
+        // If the string already exists, increment its count
+        if (strcmp(ht->table[probeIdx].key, key) == 0) {
+            ht->table[probeIdx].value++;
             return;
         }
     }
+    printf("Error: Hash table is full. Cannot insert %s\n", key);
 }
 
-// Process a batch of words for a given PE
-void* processBatch(void* arg) {
-    int peId = *(int*)arg;
-    int localCounts[26] = {0}; // Local character counts for this PE
-    int redistribution[NUM_PES][26] = {0}; // Redistribution buckets for other PEs
+// Global find function to query all PEs
+int globalFind(const char* key) {
+    int idx = hash(key) % HASH_TABLE_SIZE;
+    int targetPE = responsiblePE(idx);
 
-    // Process assigned words
-    for (int i = 0; i < opCounts[peId]; i++) {
-        char* word = operations[peId][i];
-        for (int j = 0; word[j] != '\0'; j++) {
-            char key = tolower(word[j]);
-            int targetPE = responsiblePE(key);
-
-            if (targetPE == peId) {
-                // Count locally
-                localCounts[hash(key)]++;
-            } else {
-                // Add to redistribution bucket
-                redistribution[targetPE][hash(key)]++;
-            }
-        }
-    }
-
-    // Send redistributed counts to target PEs
-    for (int target = 0; target < NUM_PES; target++) {
-        if (target != peId) {
-            pthread_mutex_lock(&hashTables[target].lock);
-            for (int c = 0; c < 26; c++) {
-                if (redistribution[target][c] > 0) {
-                    char key = 'a' + c;
-                    update(&hashTables[target], key, redistribution[target][c]);
-                }
-            }
-            pthread_mutex_unlock(&hashTables[target].lock);
-        }
-    }
-
-    // Update local hash table with localCounts
-    pthread_mutex_lock(&hashTables[peId].lock);
-    for (int c = 0; c < 26; c++) {
-        if (localCounts[c] > 0) {
-            char key = 'a' + c;
-            update(&hashTables[peId], key, localCounts[c]);
-        }
-    }
-    pthread_mutex_unlock(&hashTables[peId].lock);
-
-    return NULL;
-}
-
-// Print the hash table for a given PE
-void printHashTable(HashTable* ht, int peId) {
-    printf("PE %d Hash Table:\n", peId);
+    pthread_mutex_lock(&hashTables[targetPE].lock);
+    int result = 0;
     for (int i = 0; i < HASH_TABLE_SIZE; i++) {
-        if (ht->table[i].key != 0) {
-            printf("  %c: %d\n", ht->table[i].key, ht->table[i].value);
+        int probeIdx = (idx + i) % HASH_TABLE_SIZE;
+        if (strcmp(hashTables[targetPE].table[probeIdx].key, key) == 0) {
+            result = hashTables[targetPE].table[probeIdx].value;
+            break;
         }
     }
-    printf("\n");
+    pthread_mutex_unlock(&hashTables[targetPE].lock);
+    return result;
+}
+
+// Process a list of strings for a given PE
+void* processList(void* arg) {
+    int peId = *(int*)arg;
+
+    // Process strings in the list
+    for (int i = 0; i < stringCounts[peId]; i++) {
+        char* str = stringLists[peId][i];
+        int idx = hash(str) % HASH_TABLE_SIZE;
+        int targetPE = responsiblePE(idx);
+
+        if (targetPE == peId) {
+            pthread_mutex_lock(&hashTables[peId].lock);
+            update(&hashTables[peId], str, idx);
+            pthread_mutex_unlock(&hashTables[peId].lock);
+        } else {
+            pthread_mutex_lock(&hashTables[targetPE].lock);
+            update(&hashTables[targetPE], str, idx);
+            pthread_mutex_unlock(&hashTables[targetPE].lock);
+        }
+    }
+    return NULL;
 }
 
 int main() {
     pthread_t threads[NUM_PES];
     int peIds[NUM_PES];
 
+    // Measure time
+    struct timespec start, end;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+
     // Initialize hash tables
     for (int i = 0; i < NUM_PES; i++) {
         memset(hashTables[i].table, 0, sizeof(hashTables[i].table));
         pthread_mutex_init(&hashTables[i].lock, NULL);
+        stringCounts[i] = 0; // Reset counts for each PE
     }
 
-    // Example: assign words to PEs
-    const char* words[] = {"tobeornot", "tobethatis", "thequestion"};
-    int numWords = sizeof(words) / sizeof(words[0]);
+    // Step 1: Read the file 10 times and distribute words across PEs
+    const char* filePath = "/Users/nils/Programmering/projektDatavetenskap/Lorem-ipsum-dolor-sit-amet.txt";
+    char line[4096];
+    int totalWords = 0;
 
-    for (int i = 0; i < numWords; i++) {
-        int peId = i % NUM_PES;
-        strcpy(operations[peId][opCounts[peId]++], words[i]);
+    for (int pass = 0; pass < 10; pass++) {
+        FILE* file = fopen(filePath, "r");
+        if (!file) {
+            perror("Could not open file");
+            return 1;
+        }
+
+        while (fgets(line, sizeof(line), file)) {
+            char* token = strtok(line, " ,.-\n");
+            while (token != NULL) {
+                // Assign to PEs in round-robin fashion
+                int peId = totalWords % NUM_PES;
+                if (stringCounts[peId] < MAX_STRINGS_PER_PE) {
+                    strcpy(stringLists[peId][stringCounts[peId]++], token);
+                } else {
+                    printf("Warning: PE %d's string list is full.\n", peId);
+                }
+                totalWords++;
+                token = strtok(NULL, " ,.-\n");
+            }
+        }
+        fclose(file);
+        printf("Pass %d completed, total words so far: %d\n", pass + 1, totalWords);
     }
 
-    // Process batches in parallel
+    printf("Total words read: %d\n", totalWords);
+
+    // Step 2: Process lists in parallel
     for (int i = 0; i < NUM_PES; i++) {
         peIds[i] = i;
-        pthread_create(&threads[i], NULL, processBatch, &peIds[i]);
+        pthread_create(&threads[i], NULL, processList, &peIds[i]);
     }
 
     for (int i = 0; i < NUM_PES; i++) {
         pthread_join(threads[i], NULL);
     }
 
-    // Print hash tables
-    for (int i = 0; i < NUM_PES; i++) {
-        printHashTable(&hashTables[i], i);
+    // Step 3: Find some strings
+    const char* queryStrings[] = {"Lorem", "ipsum", "dolor", "sit", "amet", "unknown"};
+    for (int i = 0; i < sizeof(queryStrings) / sizeof(queryStrings[0]); i++) {
+        int count = globalFind(queryStrings[i]);
+        printf("Find \"%s\": %d\n", queryStrings[i], count);
     }
 
-    // Cleanup
+    // Step 4: Cleanup
     for (int i = 0; i < NUM_PES; i++) {
         pthread_mutex_destroy(&hashTables[i].lock);
     }
 
+    // Measure time
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    double elapsed = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
+    printf("Program execution time: %.6f seconds\n", elapsed);
+
     return 0;
 }
+

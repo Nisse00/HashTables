@@ -3,13 +3,18 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <time.h>
 
-#define NUM_THREADS 20
-#define NUM_ELEMENTS 1000
+#define NUM_THREADS 10
+#define MAX_WORDS 10000000// Total words to handle
+#define FILE_READS 10     // Number of times to read the file
+#define MAX_WORD_LENGTH 100
 
 // Structure to pass arguments to threads
 typedef struct {
     HashTable *ht;
+    char **words;
     int start;
     int end;
 } ThreadArgs;
@@ -17,66 +22,110 @@ typedef struct {
 // Thread function for parallel inserts
 void *threadInsert(void *args) {
     ThreadArgs *tArgs = (ThreadArgs *)args;
-    //printf("Thread %ld started, processing elements from %d to %d\n", pthread_self(), tArgs->start, tArgs->end);
-    
+
     for (int i = tArgs->start; i < tArgs->end; ++i) {
-        MyElement e = MyElement_init(i, i * 10);
-        //printf("Thread %ld: Inserting key %d with data %lld\n", pthread_self(), i, e.data);
+        MyElement e = MyElement_init(i, strlen(tArgs->words[i]));
         if (!HashTable_insert(tArgs->ht, &e)) {
             printf("Thread %ld: Failed to insert key %d\n", pthread_self(), i);
-        } else {
-            printf("Thread %ld: Successfully inserted key %d\n", pthread_self(), i);
         }
     }
-    
-    printf("Thread %ld finished\n", pthread_self());
     return NULL;
 }
 
 int main() {
+    // Measure time
+    struct timespec start, end;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+
     // Initialize the hash table
-    size_t logSize = 12; // 2^12 = 4096 slots in the hash table
+    size_t logSize = 28; // 2^12 = 4096 slots in the hash table
     HashTable *ht = HashTable_init(logSize);
     printf("HashTable initialized with %d slots\n", 1 << logSize);
 
-    // Create threads and distribute work
+    // Allocate memory to store words
+    char **words = malloc(MAX_WORDS * sizeof(char *));
+    if (!words) {
+        perror("Failed to allocate memory for words");
+        return EXIT_FAILURE;
+    }
+
+    // Step 1: Read the file 10 times
+    const char *filePath = "/Users/nils/Programmering/projektDatavetenskap/Lorem-ipsum-dolor-sit-amet.txt";
+    char line[4096];
+    int totalWords = 0;
+
+    for (int pass = 0; pass < FILE_READS; ++pass) {
+        FILE *file = fopen(filePath, "r");
+        if (!file) {
+            perror("Could not open file");
+            free(words);
+            return EXIT_FAILURE;
+        }
+
+        while (fgets(line, sizeof(line), file)) {
+            char *token = strtok(line, " ,.-\n");
+            while (token != NULL) {
+                if (totalWords < MAX_WORDS) {
+                    words[totalWords] = strdup(token);
+                    totalWords++;
+                }
+                token = strtok(NULL, " ,.-\n");
+            }
+        }
+        fclose(file);
+        printf("Pass %d completed, total words so far: %d\n", pass + 1, totalWords);
+    }
+
+    printf("Total words read: %d\n", totalWords);
+
+    // Step 2: Split work among threads
     pthread_t threads[NUM_THREADS];
     ThreadArgs args[NUM_THREADS];
-    int elementsPerThread = NUM_ELEMENTS / NUM_THREADS;
+    int wordsPerThread = totalWords / NUM_THREADS;
+    int remainder = totalWords % NUM_THREADS;
 
+    int currentWord = 0;
     for (int i = 0; i < NUM_THREADS; ++i) {
         args[i].ht = ht;
-        args[i].start = i * elementsPerThread;
-        args[i].end = (i + 1) * elementsPerThread;
-        
-        printf("Main thread: Creating thread %d to handle elements from %d to %d\n", i, args[i].start, args[i].end);
+        args[i].words = words;
+        args[i].start = currentWord;
+        args[i].end = currentWord + wordsPerThread;
+
+        if (remainder > 0) {
+            args[i].end++;
+            remainder--;
+        }
+        currentWord = args[i].end;
+
+        printf("Main thread: Creating thread %d to process words %d to %d\n", i, args[i].start, args[i].end);
         if (pthread_create(&threads[i], NULL, threadInsert, &args[i]) != 0) {
-            printf("Failed to create thread\n");
+            perror("Failed to create thread");
+            free(words);
             return EXIT_FAILURE;
         }
     }
 
-    // Join threads
+    // Step 3: Join threads
     for (int i = 0; i < NUM_THREADS; ++i) {
         if (pthread_join(threads[i], NULL) != 0) {
             printf("Failed to join thread %d\n", i);
+            free(words);
             return EXIT_FAILURE;
         }
     }
 
-    // Verify insertion
-    printf("Verifying insertion...\n");
-    for (int i = 0; i < NUM_ELEMENTS; ++i) {
-        MyElement found = HashTable_find(ht, i);
-        if (!MyElement_isEmpty(&found)) {
-            printf("Found Key: Key %d -> Data %lld\n", i, found.data);
-        } else {
-            printf("Key %d not found!\n", i);
-        }
-    }
-
-    // Clean up
+    // Step 4: Cleanup
     printf("Cleaning up hash table\n");
+    for (int i = 0; i < totalWords; ++i) {
+        free(words[i]);
+    }
+    free(words);
     HashTable_free(ht);
+
+    // Measure time
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    double elapsed = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
+    printf("Program execution time: %.6f seconds\n", elapsed);
+
     return 0;
 }

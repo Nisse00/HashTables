@@ -2,15 +2,20 @@
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
+#include <time.h>
 
-#define SIZE 15
+#define HASH_TABLE_SIZE 20000000 // Larger size for ~10 million words
+#define MAX_WORD_LENGTH 50       // Maximum word length
+#define NUM_THREADS 3     // Number of threads
 
+// Node structure for open addressing
 struct Node {
     char* key;
     int value;
     int deleted;
 };
 
+// Hash table structure
 struct HashTable {
     struct Node** table;
     int size;
@@ -18,16 +23,13 @@ struct HashTable {
 
 pthread_mutex_t lock;
 
-struct HashTable* createHashTable(int size) {
-    struct HashTable* hashtable = (struct HashTable*)malloc(sizeof(struct HashTable));
-    hashtable->size = size;
-    hashtable->table = (struct Node**)malloc(size * sizeof(struct Node*));
-    for (int i = 0; i < size; i++) {
-        hashtable->table[i] = NULL;
-    }
-    return hashtable;
-}
+// Function declarations
+struct HashTable* createHashTable(int size);
+void insert(struct HashTable* hashtable, const char* key, int value);
+struct Node* search(struct HashTable* hashtable, const char* key);
+void destroyHashTable(struct HashTable* hashtable);
 
+// Hash function
 int hashFunction(const char* key, int size) {
     unsigned long hash = 5381;
     int c;
@@ -37,97 +39,45 @@ int hashFunction(const char* key, int size) {
     return hash % size;
 }
 
+// Create the hash table
+struct HashTable* createHashTable(int size) {
+    struct HashTable* hashtable = (struct HashTable*)malloc(sizeof(struct HashTable));
+    hashtable->size = size;
+    hashtable->table = (struct Node**)calloc(size, sizeof(struct Node*));
+    return hashtable;
+}
+
+// Insert into the hash table (open addressing)
 void insert(struct HashTable* hashtable, const char* key, int value) {
-    pthread_mutex_lock(&lock);
     int index = hashFunction(key, hashtable->size);
     int originalIndex = index;
-    int i = 0;
 
-    while (hashtable->table[index] != NULL && hashtable->table[index]->deleted == 0) {
-        // Prevent infinite looping
-        if (hashtable->table[index]->key != NULL && strcmp(hashtable->table[index]->key, key) == 0) {
-            printf("Key already exists: %s\n", key);
-            pthread_mutex_unlock(&lock);
-            return;
-        }
-        if (i >= hashtable->size) {
-            printf("HashTable is full! Cannot insert %s.\n", key);
-            pthread_mutex_unlock(&lock);
-            return;
-        }
+    for (int i = 0; i < hashtable->size; i++) {
+        pthread_mutex_lock(&lock);
 
-        index = (index + 1) % hashtable->size;
-        i++;
-    }
-
-    if (hashtable->table[index] == NULL || hashtable->table[index]->deleted == 1) {
-        struct Node* newNode = (struct Node*)malloc(sizeof(struct Node));
-        newNode->key = strdup(key);
-        newNode->value = value;
-        newNode->deleted = 0;
-        hashtable->table[index] = newNode;
-        printf("Inserted %s -> %d at index %d , had original index %d\n", key, value, index, originalIndex);
-    }
-
-    pthread_mutex_unlock(&lock);
-}
-
-struct Node* search(struct HashTable* hashtable, const char* key) {
-    pthread_mutex_lock(&lock);
-
-    int index = hashFunction(key, hashtable->size);
-    int i = 0;
-
-    while (i < hashtable->size) {
-        if (hashtable->table[index] == NULL) {
-            break; // Empty slot, key not present
-        }
-
-        if (hashtable->table[index]->deleted == 0 &&
-            strcmp(hashtable->table[index]->key, key) == 0) {
-            printf("Found: %s -> %d at index %d\n", key, hashtable->table[index]->value, index);
-            pthread_mutex_unlock(&lock);
-            return hashtable->table[index];
-        }
-
-        index = (index + 1) % hashtable->size;
-        i++;
-    }
-
-    printf("Key not found: %s\n", key);
-    pthread_mutex_unlock(&lock);
-    return NULL;
-}
-
-void deleteNode(struct HashTable* hashtable, const char* key) {
-    pthread_mutex_lock(&lock);
-
-    int index = hashFunction(key, hashtable->size);
-    int i = 0;
-
-    while (i < hashtable->size) {
-        if (hashtable->table[index] == NULL) {
-            break; // Empty slot, key not present
-        }
-
-        if (hashtable->table[index]->deleted == 0 &&
-            strcmp(hashtable->table[index]->key, key) == 0) {
-            hashtable->table[index]->deleted = 1;
-            printf("Key deleted: %s\n", key);
+        if (hashtable->table[index] == NULL || hashtable->table[index]->deleted) {
+            struct Node* newNode = malloc(sizeof(struct Node));
+            newNode->key = strdup(key);
+            newNode->value = value;
+            newNode->deleted = 0;
+            hashtable->table[index] = newNode;
             pthread_mutex_unlock(&lock);
             return;
         }
 
-        index = (index + 1) % hashtable->size;
-        i++;
-    }
+        if (strcmp(hashtable->table[index]->key, key) == 0) {
+            hashtable->table[index]->value++;
+            pthread_mutex_unlock(&lock);
+            return;
+        }
 
-    printf("Key not found: %s\n", key);
-    pthread_mutex_unlock(&lock);
+        pthread_mutex_unlock(&lock);
+        index = (originalIndex + i) % hashtable->size; // Linear probing
+    }
 }
 
+// Destroy the hash table
 void destroyHashTable(struct HashTable* hashtable) {
-    pthread_mutex_lock(&lock);
     for (int i = 0; i < hashtable->size; i++) {
         if (hashtable->table[i] != NULL) {
             free(hashtable->table[i]->key);
@@ -136,15 +86,21 @@ void destroyHashTable(struct HashTable* hashtable) {
     }
     free(hashtable->table);
     free(hashtable);
-    pthread_mutex_unlock(&lock);
 }
 
-void* work(void* arg) {
-    struct HashTable* hashtable = (struct HashTable*)arg;
-    char names[10][10] = {"Alice", "Bob", "Charlie", "David", "Eve",
-                          "Frank", "Grace", "Heidi", "Ivan", "Judy"};
-    for (int i = 0; i < 10; i++) {
-        insert(hashtable, names[i], i + 1);
+// Thread data structure
+struct ThreadData {
+    char** words;
+    int wordCount;
+    struct HashTable* hashtable;
+};
+
+// Thread function
+void* processWords(void* arg) {
+    struct ThreadData* data = (struct ThreadData*)arg;
+
+    for (int i = 0; i < data->wordCount; i++) {
+        insert(data->hashtable, data->words[i], 1);
     }
     return NULL;
 }
@@ -152,38 +108,87 @@ void* work(void* arg) {
 int main() {
     pthread_mutex_init(&lock, NULL);
 
-    struct HashTable* hashtable = createHashTable(SIZE);
+    // Measure time
+    struct timespec start, end;
+    clock_gettime(CLOCK_MONOTONIC, &start);
 
-    int nbrThreads = 2; // Number of threads
-    pthread_t threads[nbrThreads];
-
-    // Create threads
-    for (int i = 0; i < nbrThreads; i++) {
-        pthread_create(&threads[i], NULL, work, hashtable);
+    // Step 1: Read the file 10 times
+    FILE* file;
+    char** words = malloc(10000000 * sizeof(char*));
+    if (!words) {
+        perror("Failed to allocate memory for words");
+        return 1;
     }
 
-    // Wait for threads to finish
-    for (int i = 0; i < nbrThreads; i++) {
+    int totalWords = 0;
+    char line[4096];
+
+    for (int pass = 0; pass < 10; pass++) {
+        file = fopen("/Users/nils/Programmering/projektDatavetenskap/Lorem-ipsum-dolor-sit-amet.txt", "r");
+        if (!file) {
+            perror("Could not open file");
+            free(words);
+            return 1;
+        }
+
+        while (fgets(line, sizeof(line), file) && totalWords < 10000000) {
+            char* token = strtok(line, " ,.-\n");
+            while (token != NULL && totalWords < 10000000) {
+                words[totalWords] = strdup(token);
+                totalWords++;
+                token = strtok(NULL, " ,.-\n");
+            }
+        }
+
+        fclose(file);
+        printf("Pass %d completed, total words so far: %d\n", pass + 1, totalWords);
+    }
+
+    printf("Total words read: %d\n", totalWords);
+
+    // Step 2: Create the hash table
+    struct HashTable* hashtable = createHashTable(HASH_TABLE_SIZE);
+
+    // Step 3: Split words among threads
+    pthread_t threads[NUM_THREADS];
+    struct ThreadData threadData[NUM_THREADS];
+
+    int wordsPerThread = totalWords / NUM_THREADS;
+    int remainder = totalWords % NUM_THREADS;
+
+    int currentWord = 0;
+    for (int i = 0; i < NUM_THREADS; i++) {
+        threadData[i].words = &words[currentWord];
+        threadData[i].wordCount = wordsPerThread;
+        threadData[i].hashtable = hashtable;
+
+        if (remainder > 0) {
+            threadData[i].wordCount++;
+            remainder--;
+        }
+        currentWord += threadData[i].wordCount;
+    }
+
+    // Step 4: Create and join threads
+    for (int i = 0; i < NUM_THREADS; i++) {
+        pthread_create(&threads[i], NULL, processWords, &threadData[i]);
+    }
+    for (int i = 0; i < NUM_THREADS; i++) {
         pthread_join(threads[i], NULL);
     }
 
-    // Search for five names
-    char* searchNames[5] = {"Alice", "Eve", "Ivan", "Charlie", "Grace"};
-    for (int i = 0; i < 5; i++) {
-        search(hashtable, searchNames[i]);
+    // Step 5: Cleanup
+    for (int i = 0; i < totalWords; i++) {
+        free(words[i]);
     }
-
-    // Delete all names
-    char names[10][10] = {"Alice", "Bob", "Charlie", "David", "Eve",
-                          "Frank", "Grace", "Heidi", "Ivan", "Judy"};
-    for (int i = 0; i < 10; i++) {
-        deleteNode(hashtable, names[i]);
-    }
-
-    // Destroy hash table
+    free(words);
     destroyHashTable(hashtable);
-
     pthread_mutex_destroy(&lock);
+
+    // Measure time
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    double elapsed = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
+    printf("Program execution time: %.6f seconds\n", elapsed);
 
     return 0;
 }
