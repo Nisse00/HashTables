@@ -9,9 +9,17 @@
 #define LONG_LONG_MAX 9223372036854775807LL
 #endif
 
-static size_t hash(long long key, size_t mask) {
-    return key % mask;
+static size_t hash(const char *str, size_t mask) {
+    size_t hash = 5381;  // Start with a large prime
+    int c;
+
+    while ((c = *str++)) {
+        hash = ((hash << 5) + hash) + c;  // hash * 33 + c
+    }
+
+    return hash & mask;  // Apply the mask to fit within table size
 }
+
 
 HashTable *HashTable_init(size_t logSize) {
     HashTable *ht = (HashTable *)malloc(sizeof(HashTable));
@@ -35,96 +43,75 @@ HashTable *HashTable_init(size_t logSize) {
     return ht;
 }
 
-// Use free instead of _aligned_free
+
 void HashTable_free(HashTable *ht) {
-    free(ht->table);  // Use free instead of _aligned_free
+    free(ht->table); 
     free(ht);
 }
 
-bool HashTable_insert(HashTable *ht, const MyElement *e) {
-    size_t h = hash(e->key, ht->mask);
-    Overwrite overwriteOp;
 
+MyElement HashTable_find(HashTable *ht, const char *key) {
+    size_t h = hash(key, ht->mask);  // Use the updated hash function
     for (size_t i = h; i < h + MAX_DIST; ++i) {
         MyElement *current = &ht->table[i & ht->mask];
-        // If the slot is empty, try to atomically insert
+
+        if (strcmp(current->key, key) == 0) {  // Compare strings
+            return *current;  // Found the key
+        }
+
         if (MyElement_isEmpty(current)) {
-            if (atomicUpdateOverwrite(current, e, overwriteOp)) {
-                return true;
+            break;  // Empty slot means the key isn't present
+        }
+    }
+    return MyElement_getEmptyValue();  // Return empty if not found
+}
+
+bool HashTable_insertOrUpdateIncrement(HashTable *ht, const MyElement *e, Increment f) {
+    size_t h = hash(e->key, ht->mask);
+
+    // Iteratively retry until success or table is full
+    for (size_t i = h; i < h + MAX_DIST; ++i) {
+        MyElement *current = &ht->table[i & ht->mask];
+
+        // If the key matches, increment the count atomically
+        if (strcmp(current->key, e->key) == 0) {
+            return atomicUpdateIncrement(current, e, f);
+        }
+
+        // If the slot is empty, try to insert atomically
+        if (MyElement_isEmpty(current)) {
+            if (MyElement_CAS(current, e)) {
+                return true;  // Successfully inserted
+            } else {
+                // CAS failed; retry the current index
+                i--;  // Decrement `i` to retry this slot
+                continue;
             }
         }
-
-        // If the key already exists, we cannot insert
-        if (current->key == e->key) {
-            return false;
-        }
     }
-    return false; // Could not find a place for the element
-}
 
-MyElement HashTable_find(HashTable *ht, long long key) {
-    size_t h = hash(key, ht->mask);
-    for (size_t i = h; i < h + MAX_DIST; ++i) {
-        MyElement *current = &ht->table[i & ht->mask];
-        // Check if the current slot is empty or contains the key
-        if (current->key == key) {
-            //printf("Found it!, the key is %lld with data %lld\n", current->key, current->data);
-            return *current;
-        }
-        if (current->key == LONG_LONG_MAX) {
-            //printf("Slot is empty\n");
-            break;  
-        }
-    }
-    return MyElement_getEmptyValue();  // Return an empty element if not found
+    return false;  // Table is full or max probing distance exceeded
 }
 
 
-bool HashTable_insertOrUpdate(HashTable *ht, const MyElement *e, Overwrite f) {
-    size_t h = hash(e->key, ht->mask);
-    for (size_t i = h; i < h + MAX_DIST; ++i) {
-        MyElement *current = &ht->table[i & ht->mask];
-        if (current->key == e->key) {
-            atomicUpdateOverwrite(current, e, f);
-            return true;
-        }
-        if (MyElement_isEmpty(current)) {
-            MyElement_copy(current, e);
-            return true;
-        }
-    }
-    return false;
-}
-
-bool HashTable_insertOrUpdateAtomic(HashTable *ht, const MyElement *e, Increment f) {
-    size_t h = hash(e->key, ht->mask);
-    for (size_t i = h; i < h + MAX_DIST; ++i) {
-        MyElement *current = &ht->table[i & ht->mask];
-        if (current->key == e->key) {
-            atomicUpdateIncrement(current, e, f);
-            return true;
-        }
-        if (MyElement_isEmpty(current)) {
-            MyElement_copy(current, e);
-            return true;
-        }
-    }
-    return false;
-}
 
 bool HashTable_insertOrUpdateDecrement(HashTable *ht, const MyElement *e, Decrement f) {
     size_t h = hash(e->key, ht->mask);
     for (size_t i = h; i < h + MAX_DIST; ++i) {
         MyElement *current = &ht->table[i & ht->mask];
-        if (current->key == e->key) {
-            atomicUpdateDecrement(current, e, f);  // Decrement operation
+
+        if (strcmp(current->key, e->key) == 0) {
+            // Increment the count atomically
+            atomicUpdateDecrement(current, e, f);
             return true;
         }
+
         if (MyElement_isEmpty(current)) {
-            MyElement_copy(current, e);
-            return true;
+            // Try to atomically insert using CAS
+            if (MyElement_CAS(current, e)) {
+                return true;
+            }
         }
     }
-    return false;
+    return false;  // Table is full or max probing distance exceeded
 }
-

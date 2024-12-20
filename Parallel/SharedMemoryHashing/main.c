@@ -6,10 +6,10 @@
 #include <string.h>
 #include <time.h>
 
-#define NUM_THREADS 10
-#define MAX_WORDS 10000000// Total words to handle
-#define FILE_READS 10     // Number of times to read the file
-#define MAX_WORD_LENGTH 100
+#define NUM_THREADS 100
+#define MAX_WORDS 10000000 // Total words to handle
+#define FILE_READS 10      // Number of times to read the file
+#define MAX_WORD_LENGTH 20
 
 // Structure to pass arguments to threads
 typedef struct {
@@ -24,9 +24,9 @@ void *threadInsert(void *args) {
     ThreadArgs *tArgs = (ThreadArgs *)args;
 
     for (int i = tArgs->start; i < tArgs->end; ++i) {
-        MyElement e = MyElement_init(i, strlen(tArgs->words[i]));
-        if (!HashTable_insert(tArgs->ht, &e)) {
-            printf("Thread %ld: Failed to insert key %d\n", pthread_self(), i);
+        MyElement e = MyElement_init(tArgs->words[i], 1);  // Use string as key
+        if (!HashTable_insertOrUpdateIncrement(tArgs->ht, &e, (Increment){})) {
+            printf("Failed to insert key \"%s\"\n", tArgs->words[i]);
         }
     }
     return NULL;
@@ -38,7 +38,7 @@ int main() {
     clock_gettime(CLOCK_MONOTONIC, &start);
 
     // Initialize the hash table
-    size_t logSize = 28; // 2^12 = 4096 slots in the hash table
+    size_t logSize = 24; // 2^24 slots in the hash table (16M slots)
     HashTable *ht = HashTable_init(logSize);
     printf("HashTable initialized with %d slots\n", 1 << logSize);
 
@@ -73,8 +73,8 @@ int main() {
             }
         }
         fclose(file);
-        printf("Pass %d completed, total words so far: %d\n", pass + 1, totalWords);
     }
+
 
     printf("Total words read: %d\n", totalWords);
 
@@ -97,7 +97,6 @@ int main() {
         }
         currentWord = args[i].end;
 
-        printf("Main thread: Creating thread %d to process words %d to %d\n", i, args[i].start, args[i].end);
         if (pthread_create(&threads[i], NULL, threadInsert, &args[i]) != 0) {
             perror("Failed to create thread");
             free(words);
@@ -114,8 +113,21 @@ int main() {
         }
     }
 
+    
+    // Step 3.5: Find and print specific keys
+    const char *keysToFind[] = {"Lorem", "ipsum", "dolor", "sit", "amet"};
+    for (int i = 0; i < 5; ++i) {
+        MyElement e = HashTable_find(ht, keysToFind[i]);
+        if (!MyElement_isEmpty(&e)) {
+            printf("Key: \"%s\" found with count: %lld\n", keysToFind[i], e.data);
+        } else {
+            printf("Key: \"%s\" not found\n", keysToFind[i]);
+        }
+    }
+    
+
+
     // Step 4: Cleanup
-    printf("Cleaning up hash table\n");
     for (int i = 0; i < totalWords; ++i) {
         free(words[i]);
     }
@@ -129,3 +141,4 @@ int main() {
 
     return 0;
 }
+

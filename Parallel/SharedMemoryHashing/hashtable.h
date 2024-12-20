@@ -16,9 +16,8 @@ typedef struct {
 
 HashTable *HashTable_init(size_t logSize);
 void HashTable_free(HashTable *ht);
-bool HashTable_insert(HashTable *ht, const MyElement *e);
-MyElement HashTable_find(HashTable *ht, long long key);
-bool HashTable_insertOrUpdate(HashTable *ht, const MyElement *e, Overwrite f);
-bool HashTable_insertOrUpdateAtomic(HashTable *ht, const MyElement *e, Increment f);
+MyElement HashTable_find(HashTable *ht, const char *key);
+bool HashTable_insertOrUpdateIncrement(HashTable *ht, const MyElement *e, Increment f);
+bool hashTable_insertOrUpdateDecrement(HashTable *ht, const MyElement *e, Decrement f);
 
 #endif // HASHTABLE_H
