@@ -4,9 +4,9 @@
 #include <pthread.h>
 #include <time.h>
 
-#define HASH_TABLE_SIZE 1000000 // Larger size for ~1 million words
+#define HASH_TABLE_SIZE 16777216 // 2^24
 #define MAX_WORD_LENGTH 50      // Maximum word length
-#define NUM_THREADS 3     // Number of threads
+#define NUM_THREADS 16    // Number of threads
 
 // Node structure for hash table
 struct Node {
@@ -136,7 +136,7 @@ if (!words) {
 int totalWords = 0;
 char line[4096];
 
-// Read the file 100 times
+// Read the file 10 times
 for (int pass = 0; pass < 10; pass++) {
     file = fopen("/Users/nils/Programmering/projektDatavetenskap/Lorem-ipsum-dolor-sit-amet.txt", "r");
     if (!file) {

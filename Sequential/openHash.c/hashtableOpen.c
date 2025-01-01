@@ -4,9 +4,9 @@
 #include <pthread.h>
 #include <time.h>
 
-#define HASH_TABLE_SIZE 20000000 // Larger size for ~10 million words
+#define HASH_TABLE_SIZE 16777216 // Larger size for ~10 million words
 #define MAX_WORD_LENGTH 50       // Maximum word length
-#define NUM_THREADS 3     // Number of threads
+#define NUM_THREADS 16  // Number of threads
 
 // Node structure for open addressing
 struct Node {

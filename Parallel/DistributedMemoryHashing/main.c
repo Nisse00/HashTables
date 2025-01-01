@@ -4,227 +4,217 @@
 #include <pthread.h>
 #include <time.h>
 
-#define HASH_TABLE_SIZE 10000  // Increased table size
-#define NUM_PES 20       // Number of Processing Elements
-#define MAX_STRING_LENGTH 100  // Maximum string length
-#define MAX_STRINGS_PER_PE 1000000 // Max strings a PE can handle
+#define NUM_PES 8
+#define GLOBAL_HASH_TABLE_SIZE 16777216
+#define HASH_TABLE_SIZE (GLOBAL_HASH_TABLE_SIZE / NUM_PARTITIONS)
+#define BATCH_SIZE 10000
+#define MAX_STRING_LENGTH 50
+#define MAX_STRINGS_PER_PE (10000000 / NUM_PARTITIONS)
+#define NUM_PARTITIONS 16  // Fixed number of partitions
 
 typedef struct {
     char key[MAX_STRING_LENGTH];
     int value;
+    struct HashEntry* next;
 } HashEntry;
 
 typedef struct {
-    HashEntry table[HASH_TABLE_SIZE];
+    HashEntry** table;
+    int size;
     pthread_mutex_t lock;
 } HashTable;
 
-HashTable hashTables[NUM_PES];
-char stringLists[NUM_PES][MAX_STRINGS_PER_PE][MAX_STRING_LENGTH];
-int stringCounts[NUM_PES] = {0};
+typedef struct {
+    char key[MAX_STRING_LENGTH];
+    int value;
+} Operation;
 
-int localBuckets[NUM_PES][HASH_TABLE_SIZE] = {0}; // Local bucket counts
-char localKeys[NUM_PES][HASH_TABLE_SIZE][MAX_STRING_LENGTH] = {{{'\0'}}}; // Local bucket keys
-int receivedBuckets[NUM_PES][HASH_TABLE_SIZE] = {0}; // Received bucket counts
-char receivedKeys[NUM_PES][HASH_TABLE_SIZE][MAX_STRING_LENGTH] = {{{'\0'}}}; // Received bucket keys
-pthread_mutex_t bucketLocks[NUM_PES]; // Locks for bucket exchange
+typedef struct {
+    Operation* operations;
+    int count;
+} Batch;
 
-// Hash function to map a string to a hash table index
-int hash(const char* str) {
+HashTable hashTables[NUM_PARTITIONS];
+Batch localBatches[NUM_PARTITIONS];
+pthread_mutex_t partitionLocks[NUM_PARTITIONS];
+char*** stringLists;
+int* stringCounts;
+
+// Hash function
+int hash(const char* str, int size) {
     unsigned long hash = 5381;
     for (int i = 0; str[i] != '\0'; i++) {
         hash = ((hash << 5) + hash) + str[i];
     }
-    return hash % HASH_TABLE_SIZE;
+    return abs((int)(hash % size));
 }
 
-// Determine which PE is responsible for a given index
-int responsiblePE(int index) {
-    int rangeSize = HASH_TABLE_SIZE / NUM_PES;
-    return index / rangeSize;
+// Responsible Partition
+int responsiblePartition(int index) {
+    return index % NUM_PARTITIONS;
 }
 
-// Insert or update a string in the hash table
-void update(HashTable* ht, const char* key, int idx) {
-    for (int i = 0; i < HASH_TABLE_SIZE; i++) {
-        int probeIdx = (idx + i) % HASH_TABLE_SIZE;
-        if (ht->table[probeIdx].key[0] == '\0') {
-            strcpy(ht->table[probeIdx].key, key);
-            ht->table[probeIdx].value = 1;
+// Insert into hash table
+void hashTableInsert(HashTable* ht, const char* key, int value) {
+    int idx = hash(key, ht->size);
+    HashEntry* current = ht->table[idx];
+
+    while (current != NULL) {
+        if (strcmp(current->key, key) == 0) {
+            current->value += value;
             return;
         }
-        if (strcmp(ht->table[probeIdx].key, key) == 0) {
-            ht->table[probeIdx].value++;
-            return;
-        }
+        current = current->next;
     }
-    printf("Error: Hash table is full. Cannot insert %s\n", key);
+
+    HashEntry* newEntry = malloc(sizeof(HashEntry));
+    strncpy(newEntry->key, key, MAX_STRING_LENGTH);
+    newEntry->key[MAX_STRING_LENGTH - 1] = '\0';
+    newEntry->value = value;
+    newEntry->next = ht->table[idx];
+    ht->table[idx] = newEntry;
 }
 
-// Fill local buckets for each thread
-void* processList(void* arg) {
-    int peId = *(int*)arg;
+// Find in hash table
+int hashTableFind(HashTable* ht, const char* key) {
+    if (!ht || !ht->table) return 0;
 
-    // Step 1: Fill local buckets
-    for (int i = 0; i < stringCounts[peId]; i++) {
-        char* str = stringLists[peId][i];
-        int idx = hash(str) % HASH_TABLE_SIZE;
-        int targetPE = responsiblePE(idx);
-
-        int found = 0;
-        for (int j = 0; j < HASH_TABLE_SIZE; j++) {
-            if (strcmp(localKeys[targetPE][j], str) == 0) {
-                localBuckets[targetPE][j]++;
-                found = 1;
-                break;
-            } else if (localKeys[targetPE][j][0] == '\0') {
-                strcpy(localKeys[targetPE][j], str);
-                localBuckets[targetPE][j] = 1;
-                found = 1;
-                break;
-            }
-        }
-        if (!found) {
-            printf("Error: Local bucket for PE %d is full.\n", targetPE);
-        }
+    int idx = hash(key, ht->size);
+    HashEntry* current = ht->table[idx];
+    while (current != NULL) {
+        if (strcmp(current->key, key) == 0) return current->value;
+        current = current->next;
     }
 
-    // Step 2: Exchange buckets with responsible threads
-    for (int targetPE = 0; targetPE < NUM_PES; targetPE++) {
-        if (peId != targetPE) {
-            pthread_mutex_lock(&bucketLocks[targetPE]);
-            for (int j = 0; j < HASH_TABLE_SIZE; j++) {
-                if (localKeys[targetPE][j][0] != '\0') {
-                    strcpy(receivedKeys[targetPE][j], localKeys[targetPE][j]);
-                    receivedBuckets[targetPE][j] = localBuckets[targetPE][j];
-                }
-            }
-            pthread_mutex_unlock(&bucketLocks[targetPE]);
-        }
-    }
+    return 0;
+}
 
-    // Step 3: Handle own bucket
-    for (int j = 0; j < HASH_TABLE_SIZE; j++) {
-        if (localKeys[peId][j][0] != '\0') {
-            update(&hashTables[peId], localKeys[peId][j], hash(localKeys[peId][j]));
-            hashTables[peId].table[hash(localKeys[peId][j])].value += localBuckets[peId][j] - 1;
-        }
-    }
+// Allocate memory
+void allocateMemory() {
+    stringLists = malloc(NUM_PARTITIONS * sizeof(char**));
+    stringCounts = malloc(NUM_PARTITIONS * sizeof(int));
 
-    // Step 4: Process received buckets
-    pthread_mutex_lock(&hashTables[peId].lock);
-    for (int sourcePE = 0; sourcePE < NUM_PES; sourcePE++) {
-        for (int j = 0; j < HASH_TABLE_SIZE; j++) {
-            if (receivedKeys[sourcePE][j][0] != '\0') {
-                update(&hashTables[peId], receivedKeys[sourcePE][j], hash(receivedKeys[sourcePE][j]));
-                hashTables[peId].table[hash(receivedKeys[sourcePE][j])].value += receivedBuckets[sourcePE][j] - 1;
-            }
+    for (int i = 0; i < NUM_PARTITIONS; i++) {
+        hashTables[i].table = calloc(HASH_TABLE_SIZE, sizeof(HashEntry*));
+        hashTables[i].size = HASH_TABLE_SIZE;
+        pthread_mutex_init(&partitionLocks[i], NULL);
+
+        localBatches[i].operations = malloc(BATCH_SIZE * sizeof(Operation));
+        localBatches[i].count = 0;
+
+        stringLists[i] = malloc(MAX_STRINGS_PER_PE * sizeof(char*));
+        for (int j = 0; j < MAX_STRINGS_PER_PE; j++) {
+            stringLists[i][j] = malloc((MAX_STRING_LENGTH + 1) * sizeof(char));
         }
+        stringCounts[i] = 0;
     }
-    pthread_mutex_unlock(&hashTables[peId].lock);
+}
+
+// Free memory
+void freeMemory() {
+    for (int i = 0; i < NUM_PARTITIONS; i++) {
+        for (int j = 0; j < MAX_STRINGS_PER_PE; j++) {
+            free(stringLists[i][j]);
+        }
+        free(stringLists[i]);
+        free(hashTables[i].table);
+        free(localBatches[i].operations);
+        pthread_mutex_destroy(&partitionLocks[i]);
+    }
+    free(stringLists);
+    free(stringCounts);
+}
+
+// Add operation to batch
+void addOperationToBatch(int partition, const char* key, int value) {
+    pthread_mutex_lock(&partitionLocks[partition]);
+    if (localBatches[partition].count < BATCH_SIZE) {
+        Operation* op = &localBatches[partition].operations[localBatches[partition].count++];
+        strncpy(op->key, key, MAX_STRING_LENGTH);
+        op->key[MAX_STRING_LENGTH - 1] = '\0';
+        op->value = value;
+    }
+    pthread_mutex_unlock(&partitionLocks[partition]);
+}
+
+// Process Partition
+void* processPartition(void* arg) {
+    int partition = *(int*)arg;
+
+    pthread_mutex_lock(&partitionLocks[partition]);
+    for (int i = 0; i < localBatches[partition].count; i++) {
+        Operation* op = &localBatches[partition].operations[i];
+        hashTableInsert(&hashTables[partition], op->key, op->value);
+    }
+    localBatches[partition].count = 0;
+    pthread_mutex_unlock(&partitionLocks[partition]);
 
     return NULL;
 }
 
-int findKey(const char* key) {
-    int idx = hash(key) % HASH_TABLE_SIZE;
-    int targetPE = responsiblePE(idx);
-
-    pthread_mutex_lock(&hashTables[targetPE].lock);
-    int result = 0;
-    for (int i = 0; i < HASH_TABLE_SIZE; i++) {
-        int probeIdx = (idx + i) % HASH_TABLE_SIZE;
-        if (strcmp(hashTables[targetPE].table[probeIdx].key, key) == 0) {
-            result = hashTables[targetPE].table[probeIdx].value;
-            break;
-        }
-    }
-    pthread_mutex_unlock(&hashTables[targetPE].lock);
-    return result;
-}
-
-
+// Main function
 int main() {
-    pthread_t threads[NUM_PES];
-    int peIds[NUM_PES];
-
     struct timespec start, end;
     clock_gettime(CLOCK_MONOTONIC, &start);
 
-    // Initialize hash tables and locks
-    for (int i = 0; i < NUM_PES; i++) {
-        memset(hashTables[i].table, 0, sizeof(hashTables[i].table));
-        pthread_mutex_init(&hashTables[i].lock, NULL);
-        pthread_mutex_init(&bucketLocks[i], NULL);
-        stringCounts[i] = 0;
-    }
+    pthread_t threads[NUM_PARTITIONS];
+    int partitionIds[NUM_PARTITIONS];
 
-    // Read file and distribute strings to PEs
-    const char* filePath = "/Users/nils/Programmering/projektDatavetenskap/Lorem-ipsum-dolor-sit-amet.txt"; // Update with your file path
+    allocateMemory();
+
+    const char* filePath = "/Users/nils/Programmering/projektDatavetenskap/Lorem-ipsum-dolor-sit-amet.txt";
     char line[4096];
     int totalWords = 0;
 
-    for (int pass = 0; pass < 10; pass++) {
+    for (int pass = 0; pass < 10; pass++) {  // Read the file 10 times
         FILE* file = fopen(filePath, "r");
         if (!file) {
             perror("Could not open file");
+            freeMemory();
             return 1;
         }
+
         while (fgets(line, sizeof(line), file)) {
             char* token = strtok(line, " ,.-\n");
-            while (token != NULL) {
-                int peId = totalWords % NUM_PES;
-                if (stringCounts[peId] < MAX_STRINGS_PER_PE) {
-                    strcpy(stringLists[peId][stringCounts[peId]++], token);
-                } else {
-                    printf("Warning: PE %d's string list is full.\n", peId);
-                }
+            while (token != NULL && totalWords < 10000000) {
+                int partition = responsiblePartition(hash(token, GLOBAL_HASH_TABLE_SIZE));
+                addOperationToBatch(partition, token, 1);
                 totalWords++;
                 token = strtok(NULL, " ,.-\n");
             }
         }
         fclose(file);
+
+        // Process partitions in parallel
+        for (int i = 0; i < NUM_PARTITIONS; i++) {
+            partitionIds[i] = i;
+            pthread_create(&threads[i], NULL, processPartition, &partitionIds[i]);
+        }
+
+        for (int i = 0; i < NUM_PARTITIONS; i++) {
+            pthread_join(threads[i], NULL);
+        }
+
+        // Reset string counts
+        for (int i = 0; i < NUM_PARTITIONS; i++) {
+            stringCounts[i] = 0;
+        }
+
+        printf("Completed pass %d, total words: %d\n", pass + 1, totalWords);
     }
 
-    printf("Total words: %d\n", totalWords);
+    const char* keysToCheck[] = {"Lorem", "ipsum", "dolor", "sit", "amet"};
+    for (int i = 0; i < 5; i++) {
+        const char* key = keysToCheck[i];
+        int partition = responsiblePartition(hash(key, GLOBAL_HASH_TABLE_SIZE));
+        int value = hashTableFind(&hashTables[partition], key);
 
-    // Create threads to process lists
-    for (int i = 0; i < NUM_PES; i++) {
-        peIds[i] = i;
-        pthread_create(&threads[i], NULL, processList, &peIds[i]);
+        printf("Key: %s, Value: %d (Stored in Partition %d)\n", key, value, partition);
     }
 
-    // Wait for threads to finish
-    for (int i = 0; i < NUM_PES; i++) {
-        pthread_join(threads[i], NULL);
-    }
-
-    // Destroy locks
-    for (int i = 0; i < NUM_PES; i++) {
-        pthread_mutex_destroy(&hashTables[i].lock);
-        pthread_mutex_destroy(&bucketLocks[i]);
-    }
-
-    // Query specific keys
-    const char* queryKeys[] = {
-        "Lorem", "ipsum", "dolor", "sit", "amet",
-        "consectetuer", "adipiscing", "elit", "Aenean",
-        "commodo", "ligula", "eget", "massa"
-    };
-    int numQueries = sizeof(queryKeys) / sizeof(queryKeys[0]);
-
-    printf("\nKey Frequencies:\n");
-    for (int i = 0; i < numQueries; i++) {
-        int count = findKey(queryKeys[i]);
-        printf("Key \"%s\" found %d times.\n", queryKeys[i], count);
-    }
-
-    // Measure execution time
+    freeMemory();
     clock_gettime(CLOCK_MONOTONIC, &end);
     double elapsed = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
-    printf("\nProgram execution time: %.6f seconds\n", elapsed);
-
+    printf("Program execution time: %.6f seconds\n", elapsed);
     return 0;
 }
-
-

@@ -6,10 +6,10 @@
 #include <string.h>
 #include <time.h>
 
-#define NUM_THREADS 100
+#define NUM_THREADS 32
 #define MAX_WORDS 10000000 // Total words to handle
 #define FILE_READS 10      // Number of times to read the file
-#define MAX_WORD_LENGTH 20
+#define MAX_WORD_LENGTH 50
 
 // Structure to pass arguments to threads
 typedef struct {
@@ -112,20 +112,6 @@ int main() {
             return EXIT_FAILURE;
         }
     }
-
-    
-    // Step 3.5: Find and print specific keys
-    const char *keysToFind[] = {"Lorem", "ipsum", "dolor", "sit", "amet"};
-    for (int i = 0; i < 5; ++i) {
-        MyElement e = HashTable_find(ht, keysToFind[i]);
-        if (!MyElement_isEmpty(&e)) {
-            printf("Key: \"%s\" found with count: %lld\n", keysToFind[i], e.data);
-        } else {
-            printf("Key: \"%s\" not found\n", keysToFind[i]);
-        }
-    }
-    
-
 
     // Step 4: Cleanup
     for (int i = 0; i < totalWords; ++i) {
