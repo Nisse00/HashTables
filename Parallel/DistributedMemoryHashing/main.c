@@ -4,7 +4,7 @@
 #include <pthread.h>
 #include <time.h>
 
-#define NUM_PES 8
+#define NUM_PES 16
 #define GLOBAL_HASH_TABLE_SIZE 16777216
 #define HASH_TABLE_SIZE (GLOBAL_HASH_TABLE_SIZE / NUM_PARTITIONS)
 #define BATCH_SIZE 10000
