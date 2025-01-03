@@ -4,13 +4,12 @@
 #include <pthread.h>
 #include <time.h>
 
-#define NUM_PES 16
 #define GLOBAL_HASH_TABLE_SIZE 16777216
-#define HASH_TABLE_SIZE (GLOBAL_HASH_TABLE_SIZE / NUM_PARTITIONS)
-#define BATCH_SIZE 10000
+#define HASH_TABLE_SIZE (GLOBAL_HASH_TABLE_SIZE / NUM_PES)
+#define BATCH_SIZE 10000000 / NUM_PES
 #define MAX_STRING_LENGTH 50
-#define MAX_STRINGS_PER_PE (10000000 / NUM_PARTITIONS)
-#define NUM_PARTITIONS 16  // Fixed number of partitions
+#define MAX_STRINGS_PER_PE (10000000 / NUM_PES)
+#define NUM_PES 16 // Fixed number of partitions
 
 typedef struct {
     char key[MAX_STRING_LENGTH];
@@ -30,13 +29,13 @@ typedef struct {
 } Operation;
 
 typedef struct {
-    Operation* operations;
+    Operation* operations; // Array of operations
     int count;
 } Batch;
 
-HashTable hashTables[NUM_PARTITIONS];
-Batch localBatches[NUM_PARTITIONS];
-pthread_mutex_t partitionLocks[NUM_PARTITIONS];
+HashTable hashTables[NUM_PES];
+Batch localBatches[NUM_PES];
+pthread_mutex_t PELocks[NUM_PES];
 char*** stringLists;
 int* stringCounts;
 
@@ -50,8 +49,8 @@ int hash(const char* str, int size) {
 }
 
 // Responsible Partition
-int responsiblePartition(int index) {
-    return index % NUM_PARTITIONS;
+int responsiblePE(int index) {
+    return index % NUM_PES;
 }
 
 // Insert into hash table
@@ -91,13 +90,13 @@ int hashTableFind(HashTable* ht, const char* key) {
 
 // Allocate memory
 void allocateMemory() {
-    stringLists = malloc(NUM_PARTITIONS * sizeof(char**));
-    stringCounts = malloc(NUM_PARTITIONS * sizeof(int));
+    stringLists = malloc(NUM_PES * sizeof(char**));
+    stringCounts = malloc(NUM_PES * sizeof(int));
 
-    for (int i = 0; i < NUM_PARTITIONS; i++) {
+    for (int i = 0; i < NUM_PES; i++) {
         hashTables[i].table = calloc(HASH_TABLE_SIZE, sizeof(HashEntry*));
         hashTables[i].size = HASH_TABLE_SIZE;
-        pthread_mutex_init(&partitionLocks[i], NULL);
+        pthread_mutex_init(&PELocks[i], NULL);
 
         localBatches[i].operations = malloc(BATCH_SIZE * sizeof(Operation));
         localBatches[i].count = 0;
@@ -112,42 +111,42 @@ void allocateMemory() {
 
 // Free memory
 void freeMemory() {
-    for (int i = 0; i < NUM_PARTITIONS; i++) {
+    for (int i = 0; i < NUM_PES; i++) {
         for (int j = 0; j < MAX_STRINGS_PER_PE; j++) {
             free(stringLists[i][j]);
         }
         free(stringLists[i]);
         free(hashTables[i].table);
         free(localBatches[i].operations);
-        pthread_mutex_destroy(&partitionLocks[i]);
+        pthread_mutex_destroy(&PELocks[i]);
     }
     free(stringLists);
     free(stringCounts);
 }
 
 // Add operation to batch
-void addOperationToBatch(int partition, const char* key, int value) {
-    pthread_mutex_lock(&partitionLocks[partition]);
-    if (localBatches[partition].count < BATCH_SIZE) {
-        Operation* op = &localBatches[partition].operations[localBatches[partition].count++];
+void addOperationToBatch(int partition, const char* key, int value) { // Add operation to batch
+    pthread_mutex_lock(&PELocks[partition]); // Lock the partition
+    if (localBatches[partition].count < BATCH_SIZE) { // If the batch is not full
+        Operation* op = &localBatches[partition].operations[localBatches[partition].count++]; 
         strncpy(op->key, key, MAX_STRING_LENGTH);
         op->key[MAX_STRING_LENGTH - 1] = '\0';
         op->value = value;
     }
-    pthread_mutex_unlock(&partitionLocks[partition]);
+    pthread_mutex_unlock(&PELocks[partition]);
 }
 
-// Process Partition
-void* processPartition(void* arg) {
-    int partition = *(int*)arg;
+// Process Batch
+void* processBatch(void* arg) {
+    int PE = *(int*)arg;
 
-    pthread_mutex_lock(&partitionLocks[partition]);
-    for (int i = 0; i < localBatches[partition].count; i++) {
-        Operation* op = &localBatches[partition].operations[i];
-        hashTableInsert(&hashTables[partition], op->key, op->value);
+    pthread_mutex_lock(&PELocks[PE]);
+    for (int i = 0; i < localBatches[PE].count; i++) {
+        Operation* op = &localBatches[PE].operations[i];
+        hashTableInsert(&hashTables[PE], op->key, op->value);
     }
-    localBatches[partition].count = 0;
-    pthread_mutex_unlock(&partitionLocks[partition]);
+    localBatches[PE].count = 0;
+    pthread_mutex_unlock(&PELocks[PE]);
 
     return NULL;
 }
@@ -157,12 +156,12 @@ int main() {
     struct timespec start, end;
     clock_gettime(CLOCK_MONOTONIC, &start);
 
-    pthread_t threads[NUM_PARTITIONS];
-    int partitionIds[NUM_PARTITIONS];
+    pthread_t threads[NUM_PES];
+    int PEids[NUM_PES];
 
     allocateMemory();
 
-    const char* filePath = "/Users/nils/Programmering/projektDatavetenskap/Lorem-ipsum-dolor-sit-amet.txt";
+    const char* filePath = "Lorem-ipsum-dolor-sit-amet.txt";
     char line[4096];
     int totalWords = 0;
 
@@ -177,8 +176,8 @@ int main() {
         while (fgets(line, sizeof(line), file)) {
             char* token = strtok(line, " ,.-\n");
             while (token != NULL && totalWords < 10000000) {
-                int partition = responsiblePartition(hash(token, GLOBAL_HASH_TABLE_SIZE));
-                addOperationToBatch(partition, token, 1);
+                int partition = responsiblePE(hash(token, GLOBAL_HASH_TABLE_SIZE)); // Determine partition
+                addOperationToBatch(partition, token, 1); // Add operation to batch of the partition
                 totalWords++;
                 token = strtok(NULL, " ,.-\n");
             }
@@ -186,31 +185,32 @@ int main() {
         fclose(file);
 
         // Process partitions in parallel
-        for (int i = 0; i < NUM_PARTITIONS; i++) {
-            partitionIds[i] = i;
-            pthread_create(&threads[i], NULL, processPartition, &partitionIds[i]);
+        for (int i = 0; i < NUM_PES; i++) {
+            PEids[i] = i;
+            pthread_create(&threads[i], NULL, processBatch, &PEids[i]);
         }
 
-        for (int i = 0; i < NUM_PARTITIONS; i++) {
+        for (int i = 0; i < NUM_PES; i++) {
             pthread_join(threads[i], NULL);
         }
 
         // Reset string counts
-        for (int i = 0; i < NUM_PARTITIONS; i++) {
+        for (int i = 0; i < NUM_PES; i++) {
             stringCounts[i] = 0;
         }
 
-        printf("Completed pass %d, total words: %d\n", pass + 1, totalWords);
+       // printf("Completed pass %d, total words: %d\n", pass + 1, totalWords);
     }
-
+    /*
     const char* keysToCheck[] = {"Lorem", "ipsum", "dolor", "sit", "amet"};
     for (int i = 0; i < 5; i++) {
         const char* key = keysToCheck[i];
-        int partition = responsiblePartition(hash(key, GLOBAL_HASH_TABLE_SIZE));
+        int partition = responsiblePE(hash(key, GLOBAL_HASH_TABLE_SIZE));
         int value = hashTableFind(&hashTables[partition], key);
 
         printf("Key: %s, Value: %d (Stored in Partition %d)\n", key, value, partition);
     }
+    */
 
     freeMemory();
     clock_gettime(CLOCK_MONOTONIC, &end);

@@ -6,7 +6,7 @@
 
 #define HASH_TABLE_SIZE 16777216 // Larger size for ~10 million words
 #define MAX_WORD_LENGTH 50       // Maximum word length
-#define NUM_THREADS 16  // Number of threads
+#define NUM_THREADS 1  // Number of threads
 
 // Node structure for open addressing
 struct Node {
@@ -124,7 +124,7 @@ int main() {
     char line[4096];
 
     for (int pass = 0; pass < 10; pass++) {
-        file = fopen("/Users/nils/Programmering/projektDatavetenskap/Lorem-ipsum-dolor-sit-amet.txt", "r");
+        file = fopen("Lorem-ipsum-dolor-sit-amet.txt", "r");
         if (!file) {
             perror("Could not open file");
             free(words);

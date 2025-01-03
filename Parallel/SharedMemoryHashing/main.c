@@ -50,7 +50,7 @@ int main() {
     }
 
     // Step 1: Read the file 10 times
-    const char *filePath = "/Users/nils/Programmering/projektDatavetenskap/Lorem-ipsum-dolor-sit-amet.txt";
+    const char *filePath = "Lorem-ipsum-dolor-sit-amet.txt";
     char line[4096];
     int totalWords = 0;
 

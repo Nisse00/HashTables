@@ -138,7 +138,7 @@ char line[4096];
 
 // Read the file 10 times
 for (int pass = 0; pass < 10; pass++) {
-    file = fopen("/Users/nils/Programmering/projektDatavetenskap/Lorem-ipsum-dolor-sit-amet.txt", "r");
+    file = fopen("Lorem-ipsum-dolor-sit-amet.txt", "r");
     if (!file) {
         perror("Could not open file");
         free(words);
